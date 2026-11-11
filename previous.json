@@ -1,0 +1,16 @@
+{
+ "version": "33b5b7d",
+ "built": 1792860810,
+ "notes": "Test release",
+ "firmware": {
+  "file": "tally-firmware-33b5b7d.bin",
+  "size": 2439776,
+  "sha256": "5be54f303385b117688568fbd64130972238055495be405742600df59080537b"
+ },
+ "files": {
+  "file": "tally-files-33b5b7d.pack",
+  "size": 1307053,
+  "sha256": "aa1d2b0befd5854b5af2aec2a3d71415d3af575dbdb2160fd18339ead8b796f9"
+ },
+ "signature": "MEQCIESPWZNHGlh1IhM9oz/hG2e24QlEOXdt413MGVVYkkMdAiAGgHFiplVK6by5BWI+owe20Zp4NSIME1vb28W6lszkrw=="
+}

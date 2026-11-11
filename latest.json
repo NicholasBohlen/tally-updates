@@ -1,0 +1,16 @@
+{
+ "version": "2859be2",
+ "built": 1794363931,
+ "notes": "The first release on Tally's update site",
+ "firmware": {
+  "file": "tally-firmware-2859be2.bin",
+  "size": 3052512,
+  "sha256": "0c392777a18f1bc225b4cfd0ae8d0ae4680d223351634e2e57648784fa13fb8e"
+ },
+ "files": {
+  "file": "tally-files-2859be2.pack",
+  "size": 803474,
+  "sha256": "5b5c9ffa57bb695f0893dafb0f5767dfc7a481c507ed733e8d19da991e120ecf"
+ },
+ "signature": "MEUCICxsBZROeqaLVsDnELwK16lqvXdn9LVCUsF04qkEnuqHAiEA2QMpmys8NoHUlR4fv7VTnD/CJ9Ht55H5eCuv9/ALIUg="
+}
