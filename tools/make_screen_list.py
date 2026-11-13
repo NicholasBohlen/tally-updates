@@ -1,39 +1,64 @@
 #!/usr/bin/env python3
-"""The boards' Movies & TV list (2026-11-13): what's in theaters, what's new to stream, and the shows people are
-watching, each with its genres, its rating, its age rating and where to watch it, from TMDB.
+"""The boards' Movies & TV list (2026-11-13; free sources that allow commercial use, 2026-11-13 evening): what's in
+theaters, what's new to stream and this week's new shows and seasons, each with its genres, its age rating or rating,
+and where to watch it.
 
-One key, the maker's, makes the list once a day (the update site's nightly job, .github/workflows/screen.yml in
-tally-updates); every board reads the small file it writes, so no board carries a key.
+    python3 tools/make_screen_list.py screen.json
 
-    TMDB_API_KEY=... python3 tools/make_screen_list.py screen.json
-
-TMDB_API_KEY: a TMDB API key (v3), or its read access token (v4, the long one). Only the standard library, so the
-nightly job needs nothing installed. This product uses the TMDB API but is not endorsed or certified by TMDB.
+Made once a day by the update site's nightly job (.github/workflows/screen.yml in tally-updates); every board reads the
+small file it writes. No keys. The sources:
+  - Wikidata (CC0): the films released in the US lately, their genres, age rating, distributor and critics' score.
+  - Wikimedia's page views (CC0): how much each film or show is being looked up this week, for the order.
+  - TVmaze (CC BY-SA, commercial use allowed with credit): the shows' premieres, networks, genres and ratings.
+The list itself is CC BY-SA, as TVmaze's data is. Only the standard library, so the nightly job needs nothing installed.
 """
 import datetime
 import json
-import os
 import sys
+import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 
-API = "https://api.themoviedb.org/3"
-REGION = "US"
+AGENT = "TallyScoreboardList/1.0 (https://github.com/NicholasBohlen/tally-updates; tallboards@gmail.com)"  # (Wikimedia asks for a way to reach you)
 COUNT = 10  # (each list: the board shows up to 8)
-KEY = os.environ.get("TMDB_API_KEY", "").strip()
+THEATER_DAYS = 35
+STREAM_DAYS = 42
+
+# Distributors that put films straight on their service: a film of theirs is "new to stream" there, not in theaters.
+STREAMERS = {"Netflix": "Netflix", "Apple TV": "Apple TV", "Apple TV+": "Apple TV", "Apple Original Films": "Apple TV",
+             "Amazon Prime Video": "Prime Video", "Prime Video": "Prime Video", "Hulu": "Hulu", "Disney+": "Disney+",
+             "Max": "HBO Max", "HBO Max": "HBO Max", "Peacock": "Peacock", "Paramount+": "Paramount+", "Shudder": "Shudder",
+             "Tubi": "Tubi", "Roku Channel": "Roku", "The Roku Channel": "Roku"}
+
+# Wikidata's genres ("science fiction action film") as the panel's one or two words, the more telling first.
+GENRES = [("documentary", "Documentary"), ("animat", "Animation"), ("horror", "Horror"), ("science fiction", "Sci-Fi"),
+          ("superhero", "Superhero"), ("christmas", "Holiday"), ("musical", "Musical"), ("western", "Western"),
+          ("thriller", "Thriller"), ("comedy", "Comedy"), ("romantic", "Romance"), ("romance", "Romance"),
+          ("fantasy", "Fantasy"), ("action", "Action"), ("adventure", "Adventure"), ("heist", "Crime"), ("crime", "Crime"),
+          ("mystery", "Mystery"), ("war", "War"), ("sport", "Sports"), ("biographical", "Biopic"), ("family", "Family"),
+          ("children", "Family"), ("drama", "Drama")]
 
 
-def get(path, **params):
-    params.setdefault("language", "en-US")
-    headers = {"Accept": "application/json", "User-Agent": "Tally scoreboard list (github.com/NicholasBohlen/tally-updates)"}
-    if len(KEY) > 40:  # (the v4 read access token)
-        headers["Authorization"] = "Bearer " + KEY
-    else:
-        params["api_key"] = KEY
-    request = urllib.request.Request(API + path + "?" + urllib.parse.urlencode(params), headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as answer:
-        return json.load(answer)
+def fetch(url, accept="application/json", tries=5):
+    for attempt in range(tries):
+        try:
+            request = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": AGENT})
+            with urllib.request.urlopen(request, timeout=60) as answer:
+                return json.load(answer)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            if attempt == tries - 1:
+                raise
+            wait = error.headers.get("Retry-After", "") if error.code == 429 else ""
+            time.sleep(int(wait) if wait.isdigit() else 3 * (attempt + 1) * (3 if error.code == 429 else 1))
+            continue
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == tries - 1:
+                raise
+        time.sleep(2 + attempt * 3)
 
 
 def plain(text):
@@ -43,101 +68,149 @@ def plain(text):
     return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().strip()
 
 
-def rating(item):
-    """TMDB's score out of 10 (one place), when enough people have rated it to mean something."""
-    if (item.get("vote_count") or 0) < 25 or not item.get("vote_average"):
-        return None
-    return round(float(item["vote_average"]), 1)
+def short_genres(labels):
+    out = []
+    joined = " | ".join(label.lower() for label in labels)
+    for word, name in GENRES:
+        if word in joined and name not in out:
+            out.append(name)
+    return out[:2]
 
 
-def provider(details):
-    """Where to stream it in the region: the first subscription service, or the first place to rent or buy it."""
-    found = ((details.get("watch/providers") or {}).get("results") or {}).get(REGION) or {}
-    for kind in ("flatrate", "free", "ads", "rent", "buy"):
-        if found.get(kind):
-            return plain(found[kind][0].get("provider_name"))
-    return ""
+def sparql(query):
+    url = "https://query.wikidata.org/sparql?" + urllib.parse.urlencode({"query": query})
+    return fetch(url, "application/sparql-results+json")["results"]["bindings"]
 
 
-def movie_cert(details):
-    """The age rating (PG-13): the region's theatrical one, else any it has."""
-    for release_set in (details.get("release_dates") or {}).get("results") or []:
-        if release_set.get("iso_3166_1") != REGION:
-            continue
-        dates = release_set.get("release_dates") or []
-        for wanted in (3, 2, 4, 5, None):
-            for one in dates:
-                if one.get("certification") and (wanted is None or one.get("type") == wanted):
-                    return one["certification"]
-    return ""
-
-
-def tv_cert(details):
-    for one in (details.get("content_ratings") or {}).get("results") or []:
-        if one.get("iso_3166_1") == REGION and one.get("rating"):
-            return one["rating"]
-    return ""
-
-
-def movie(item, genres):
-    details = get(f"/movie/{item['id']}", append_to_response="release_dates,watch/providers")
-    out = {"title": plain(details.get("title") or item.get("title")), "year": (details.get("release_date") or "")[:4],
-           "genres": [genres[g] for g in item.get("genre_ids", []) if g in genres][:2]}
-    if rating(details) is not None:
-        out["rating"] = rating(details)
-    for key, value in (("cert", movie_cert(details)), ("where", provider(details)), ("runtime", details.get("runtime") or 0)):
-        if value:
-            out[key] = value
+def week_views(articles):
+    """Each English Wikipedia article's views over the last seven days (people, not bots)."""
+    end = datetime.date.today() - datetime.timedelta(days=1)
+    start = end - datetime.timedelta(days=6)
+    out = {}
+    for article in articles:
+        name = urllib.parse.quote(article.replace(" ", "_"), safe="")
+        try:
+            data = fetch("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/"
+                         f"{name}/daily/{start:%Y%m%d}/{end:%Y%m%d}")
+        except (urllib.error.URLError, TimeoutError):
+            data = None  # (not counted: the rest of the list still made)
+        out[article] = sum(item.get("views", 0) for item in (data or {}).get("items", []))
+        time.sleep(0.2)
     return out
 
 
-def show(item, genres):
-    details = get(f"/tv/{item['id']}", append_to_response="content_ratings,watch/providers")
-    out = {"title": plain(details.get("name") or item.get("name")), "genres": [genres[g] for g in item.get("genre_ids", []) if g in genres][:2]}
-    if rating(details) is not None:
-        out["rating"] = rating(details)
-    where = provider(details) or plain(((details.get("networks") or [{}])[0]).get("name"))
-    for key, value in (("cert", tv_cert(details)), ("where", where)):
-        if value:
-            out[key] = value
-    upcoming = details.get("next_episode_to_air") or {}
-    if upcoming.get("air_date"):
-        out["next"] = {"date": upcoming["air_date"], "season": upcoming.get("season_number"), "episode": upcoming.get("episode_number")}
-    return out
+def article_of(url):
+    return urllib.parse.unquote(url.rsplit("/wiki/", 1)[-1]).replace("_", " ") if url else ""
 
 
-def short_genre(name):
-    return {"Science Fiction": "Sci-Fi", "Sci-Fi & Fantasy": "Sci-Fi", "Action & Adventure": "Action", "War & Politics": "War"}.get(name, name)
+def title_of(label, article):
+    """The film's name: its Wikidata label, or (no English label yet: "Q133341572") its article's, the "(2026 film)" off."""
+    if label and not (label[0] == "Q" and label[1:].isdigit()):
+        return plain(label)
+    name = article
+    if name.endswith(")") and " (" in name:
+        name = name[:name.rfind(" (")]
+    return plain(name)
+
+
+def films(today):
+    since = today - datetime.timedelta(days=max(THEATER_DAYS, STREAM_DAYS))
+    rows = sparql(f"""
+SELECT ?film ?filmLabel (MIN(?date) AS ?released) (SAMPLE(?certLabel) AS ?cert) (SAMPLE(?article) AS ?wiki)
+       (GROUP_CONCAT(DISTINCT ?genreLabel; separator="|") AS ?genres) (GROUP_CONCAT(DISTINCT ?distLabel; separator="|") AS ?dists)
+       (SAMPLE(?score) AS ?critics) WHERE {{
+  ?film wdt:P31 wd:Q11424; p:P577 ?when. ?when ps:P577 ?date; pq:P291 wd:Q30.
+  FILTER(?date >= "{since}T00:00:00Z"^^xsd:dateTime && ?date <= "{today}T23:59:59Z"^^xsd:dateTime)
+  ?article schema:about ?film; schema:isPartOf <https://en.wikipedia.org/>.
+  OPTIONAL {{ ?film wdt:P1657 ?certItem. ?certItem rdfs:label ?certLabel. FILTER(LANG(?certLabel) = "en") }}
+  OPTIONAL {{ ?film wdt:P136 ?genre. ?genre rdfs:label ?genreLabel. FILTER(LANG(?genreLabel) = "en") }}
+  OPTIONAL {{ ?film wdt:P750 ?dist. ?dist rdfs:label ?distLabel. FILTER(LANG(?distLabel) = "en") }}
+  OPTIONAL {{ ?film p:P444 ?review. ?review ps:P444 ?score; pq:P447 wd:Q150248. }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+}} GROUP BY ?film ?filmLabel""")
+    found = []
+    for row in rows:
+        value = lambda key: (row.get(key) or {}).get("value", "")
+        released = datetime.date.fromisoformat(value("released")[:10])
+        article = article_of(value("wiki"))
+        distributors = [name for name in value("dists").split("|") if name]
+        where = next((STREAMERS[name] for name in distributors if name in STREAMERS), "")
+        film = {"title": title_of(value("filmLabel"), article), "genres": short_genres(value("genres").split("|")),
+                "released": released.isoformat(), "article": article}
+        cert = value("cert").replace("Motion Picture Association film rating", "").strip()
+        if cert in ("G", "PG", "PG-13", "R", "NC-17"):
+            film["cert"] = cert
+        score = value("critics").split("/")[0]
+        if score.isdigit():
+            film["critics"] = int(score)  # (Metacritic's, out of 100)
+        if where:
+            film["where"] = where
+        if film["title"]:
+            found.append(film)
+    views = week_views({film["article"] for film in found})
+    for film in found:
+        film["views"] = views.get(film.pop("article"), 0)
+    found.sort(key=lambda film: -film["views"])
+    theaters = [film for film in found if not film.get("where") and film["released"] >= (today - datetime.timedelta(days=THEATER_DAYS)).isoformat()]
+    streaming = [film for film in found if film.get("where")]
+    for film in theaters + streaming:
+        film.pop("released")
+    return theaters[:COUNT], streaming[:COUNT]
+
+
+def new_shows(today):
+    """This week's series and season premieres (TVmaze: on the air and streaming, in the US or everywhere), most looked-up
+    first (Wikipedia page views, through Wikidata's TVmaze IDs; TVmaze's own weight when a show has no article)."""
+    shows = {}
+    for days_back in range(7):
+        day = (today - datetime.timedelta(days=days_back)).isoformat()
+        for url in (f"https://api.tvmaze.com/schedule?country=US&date={day}", f"https://api.tvmaze.com/schedule/web?date={day}"):
+            for episode in fetch(url) or []:
+                show = episode.get("show") or (episode.get("_embedded") or {}).get("show") or {}
+                if episode.get("number") != 1 or not show.get("id") or show.get("type") in ("News", "Talk Show", "Sports"):
+                    continue
+                channel = show.get("webChannel") or show.get("network") or {}
+                country = (channel.get("country") or {}).get("code")
+                if country not in (None, "US"):
+                    continue
+                shows.setdefault(show["id"], {"title": plain(show.get("name")), "genres": [{"Science-Fiction": "Sci-Fi"}.get(g, g) for g in (show.get("genres") or [])[:2]],
+                                              "where": plain(channel.get("name")), "season": episode.get("season"),
+                                              "rating": (show.get("rating") or {}).get("average"), "weight": show.get("weight") or 0})
+        time.sleep(0.5)  # (TVmaze: 20 asks in 10 seconds)
+    if not shows:
+        return []
+    ids = " ".join(f'"{show_id}"' for show_id in shows)
+    rows = sparql(f"""
+SELECT ?tvmaze ?article WHERE {{
+  VALUES ?tvmaze {{ {ids} }}
+  ?item wdt:P8600 ?tvmaze. ?article schema:about ?item; schema:isPartOf <https://en.wikipedia.org/>.
+}}""")
+    articles = {int(row["tvmaze"]["value"]): article_of(row["article"]["value"]) for row in rows}
+    views = week_views(set(articles.values()))
+    for show_id, show in shows.items():
+        show["views"] = views.get(articles.get(show_id), 0) or show["weight"] * 10  # (no article: TVmaze's weight, low)
+    ranked = sorted(shows.values(), key=lambda show: -show["views"])[:COUNT]
+    for show in ranked:
+        show.pop("weight")
+        if show["rating"] is None:
+            show.pop("rating")
+        if show["season"] == 1:
+            show["new"] = True
+    return ranked
 
 
 def main():
-    if not KEY:
-        raise SystemExit("Set TMDB_API_KEY (a TMDB API key or read access token).")
     out_path = sys.argv[1] if len(sys.argv) > 1 else "screen.json"
-    movie_genres = {g["id"]: short_genre(g["name"]) for g in get("/genre/movie/list")["genres"]}
-    tv_genres = {g["id"]: short_genre(g["name"]) for g in get("/genre/tv/list")["genres"]}
     today = datetime.date.today()
-
-    playing = get("/movie/now_playing", region=REGION)["results"]
-    playing.sort(key=lambda item: -(item.get("popularity") or 0))
-    theaters = [movie(item, movie_genres) for item in playing[:COUNT]]
-
-    # (new to stream: out on a service in the region in the last six weeks, the most watched first)
-    streaming_found = get("/discover/movie", region=REGION, watch_region=REGION, sort_by="popularity.desc",
-                          with_release_type="4|6", with_watch_monetization_types="flatrate",
-                          **{"release_date.gte": (today - datetime.timedelta(days=42)).isoformat(), "release_date.lte": today.isoformat()})["results"]
-    streaming = [one for one in (movie(item, movie_genres) for item in streaming_found[:COUNT + 4]) if one.get("where")][:COUNT]
-
-    trending = [item for item in get("/trending/tv/week")["results"] if set(item.get("origin_country") or []) & {"US", "GB", "CA", "AU"}]
-    shows = [show(item, tv_genres) for item in trending[:COUNT]]
-
-    data = {"made": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"), "region": REGION,
-            "source": "TMDB (this product uses the TMDB API but is not endorsed or certified by TMDB)",
+    theaters, streaming = films(today)
+    shows = new_shows(today)
+    data = {"made": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"), "region": "US",
+            "license": "CC BY-SA 4.0", "sources": "Wikidata (CC0), Wikimedia page views (CC0), TVmaze (tvmaze.com, CC BY-SA)",
             "theaters": theaters, "streaming": streaming, "shows": shows}
     text = json.dumps(data, separators=(",", ":"), ensure_ascii=True)
     with open(out_path, "w") as out:
         out.write(text)
-    print(f"{out_path}: {len(theaters)} in theaters, {len(streaming)} new to stream, {len(shows)} shows ({len(text) // 1024} KB)")
+    print(f"{out_path}: {len(theaters)} in theaters, {len(streaming)} new to stream, {len(shows)} new shows ({len(text) // 1024} KB)")
 
 
 if __name__ == "__main__":
