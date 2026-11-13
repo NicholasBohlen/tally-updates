@@ -136,7 +136,7 @@ SELECT ?film ?filmLabel (MIN(?date) AS ?released) (SAMPLE(?certLabel) AS ?cert) 
         distributors = [name for name in value("dists").split("|") if name]
         where = next((STREAMERS[name] for name in distributors if name in STREAMERS), "")
         film = {"title": title_of(value("filmLabel"), article), "genres": short_genres(value("genres").split("|")),
-                "released": released.isoformat(), "article": article}
+                "released": released.isoformat(), "article": article, "qid": value("film").rsplit("/", 1)[-1]}
         cert = value("cert").replace("Motion Picture Association film rating", "").strip()
         if cert in ("G", "PG", "PG-13", "R", "NC-17"):
             film["cert"] = cert
@@ -153,9 +153,35 @@ SELECT ?film ?filmLabel (MIN(?date) AS ?released) (SAMPLE(?certLabel) AS ?cert) 
     found.sort(key=lambda film: -film["views"])
     theaters = [film for film in found if not film.get("where") and film["released"] >= (today - datetime.timedelta(days=THEATER_DAYS)).isoformat()]
     streaming = [film for film in found if film.get("where")]
+    theaters, streaming = theaters[:COUNT], streaming[:COUNT]
+    add_cast(theaters + streaming)
     for film in theaters + streaming:
         film.pop("released")
-    return theaters[:COUNT], streaming[:COUNT]
+        film.pop("qid", None)
+    return theaters, streaming
+
+
+def add_cast(films):
+    """Each film's two best-known cast members (Wikidata's cast, the most widely written-about first: how many
+    Wikipedias have an article on them)."""
+    ids = " ".join("wd:" + film["qid"] for film in films if film.get("qid", "").startswith("Q"))
+    if not ids:
+        return
+    rows = sparql(f"""
+SELECT ?film ?actorLabel ?links WHERE {{
+  VALUES ?film {{ {ids} }}
+  ?film wdt:P161 ?actor. ?actor wikibase:sitelinks ?links.
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+}}""")
+    cast = {}
+    for row in rows:
+        name = plain(row["actorLabel"]["value"])
+        if name and not (name[0] == "Q" and name[1:].isdigit()):
+            cast.setdefault(row["film"]["value"].rsplit("/", 1)[-1], []).append((int(row["links"]["value"]), name))
+    for film in films:
+        best = sorted(cast.get(film.get("qid"), []), key=lambda pair: -pair[0])
+        if best:
+            film["cast"] = [name for _, name in best[:2]]
 
 
 def new_shows(today):
@@ -190,6 +216,13 @@ SELECT ?tvmaze ?article WHERE {{
     for show_id, show in shows.items():
         show["views"] = views.get(articles.get(show_id), 0) or show["weight"] * 10  # (no article: TVmaze's weight, low)
     ranked = sorted(shows.values(), key=lambda show: -show["views"])[:COUNT]
+    for show_id, show in shows.items():  # (the top-billed two, TVmaze's cast in its order)
+        if show in ranked:
+            people = fetch(f"https://api.tvmaze.com/shows/{show_id}/cast") or []
+            names = [plain((one.get("person") or {}).get("name")) for one in people[:2]]
+            if any(names):
+                show["cast"] = [name for name in names if name]
+            time.sleep(0.5)
     for show in ranked:
         show.pop("weight")
         if show["rating"] is None:
