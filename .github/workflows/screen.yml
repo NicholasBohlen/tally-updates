@@ -1,0 +1,28 @@
+# The boards' Movies & TV list, made each night (tools/make_screen_list.py, from the Tally repo): screen.json, which
+# every board reads. The TMDB key is this repo's secret TMDB_API_KEY (Settings > Secrets and variables > Actions);
+# until it's there, the job says so and stops.
+name: Movies and TV list
+on:
+  schedule:
+    - cron: "17 9 * * *"  # (each day, 9:17 UTC: early morning in the US)
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make the list
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          if [ -z "$TMDB_API_KEY" ]; then echo "No TMDB_API_KEY secret yet: nothing made."; exit 0; fi
+          python3 tools/make_screen_list.py screen.json
+      - name: Publish it
+        run: |
+          git config user.name "Tally list"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add screen.json 2>/dev/null || exit 0
+          git diff --cached --quiet && exit 0
+          git commit -q -m "Movies and TV list" && git push -q
