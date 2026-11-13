@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-AGENT = "TallyScoreboardList/1.0 (https://github.com/NicholasBohlen/tally-updates; tallboards@gmail.com)"  # (Wikimedia asks for a way to reach you)
+AGENT = "TallyScoreboardList/1.0 (https://github.com/NicholasBohlen/tally-updates; tallyboards@gmail.com)"  # (Wikimedia asks for a way to reach you)
 COUNT = 10  # (each list: the board shows up to 8)
 THEATER_DAYS = 35
 STREAM_DAYS = 42
